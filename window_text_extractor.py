@@ -1,11 +1,11 @@
 """
-窗口文本提取工具 v1.5.0
+窗口文本提取工具 v1.5.1
 功能：拖动按钮到目标窗口，提取该窗口内的所有文本
 新增：
-1. 结果分区块显示（头部信息+各方法区块）
-2. 每个区块独立线框、独立复制按钮
-3. Ctrl+A只选中当前区块
-4. 底部"复制原始文本"按钮
+1. 菜单栏新增"限制区块高度"快捷开关
+2. 支持动态切换区块高度限制模式
+3. 限制模式：最大高度15行，超出显示滚动条
+4. 无限制模式：完全展开内容，无滚动条
 """
 
 import tkinter as tk
@@ -26,7 +26,7 @@ class WindowTextExtractor:
     def __init__(self, root):
         """初始化主窗口"""
         self.root = root
-        self.root.title("窗口文本提取工具 v1.5.0")
+        self.root.title("窗口文本提取工具 v1.5.1")
         
         # 窗口尺寸设置
         self.root.geometry("700x600")
@@ -50,6 +50,12 @@ class WindowTextExtractor:
         
         # 当前选中的筛选标签
         self.current_filter = None
+
+        # 新增：区块高度限制开关 (True=限制高度, False=完全展开)
+        self.limit_height = True
+        
+        # 新增：限制模式下的最大行数
+        self.max_display_lines = 15
 
         # 默认颜色配置（控件类型 -> 颜色）
         self.color_settings = {
@@ -137,6 +143,23 @@ class WindowTextExtractor:
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="帮助", menu=help_menu)
         help_menu.add_command(label="关于", command=self.show_about)
+
+        # 新增：快捷按钮 - 限制区块高度
+        # 使用 add_checkbutton 在菜单栏添加复选框
+        self.limit_height_var = tk.BooleanVar(value=self.limit_height)
+        menubar.add_checkbutton(
+            label="限制区块高度",
+            variable=self.limit_height_var,
+            command=self.toggle_height_limit,
+            onvalue=True,
+            offvalue=False
+        )
+
+    def toggle_height_limit(self):
+        """切换高度限制模式"""
+        self.limit_height = self.limit_height_var.get()
+        # 重新渲染所有区块以应用新设置
+        self.render_all_sections()
 
     def open_color_settings(self):
         """打开颜色设置窗口"""
@@ -282,11 +305,11 @@ class WindowTextExtractor:
         """显示关于对话框"""
         messagebox.showinfo(
             "关于",
-            "窗口文本提取工具 v1.5.0\n\n"
+            "窗口文本提取工具 v1.5.1\n\n"
             "功能：拖动按钮到目标窗口，提取所有文本\n"
             "支持分区块显示、独立复制\n"
-            "支持语法高亮显示控件类型标签\n"
-            "支持结果筛选过滤\n\n"
+            "支持切换区块高度限制模式\n"
+            "支持语法高亮显示控件类型标签\n\n"
             "依赖库：\n"
             "- pywin32\n"
             "- pywinauto\n"
@@ -308,7 +331,6 @@ class WindowTextExtractor:
         )
         clear_button.pack(side=tk.LEFT, padx=5)
 
-        # 改为"复制原始文本"
         copy_button = tk.Button(
             bottom_frame,
             text="复制原始文本",
@@ -484,14 +506,6 @@ class WindowTextExtractor:
     def create_section_frame(self, parent, title, is_header=False):
         """
         创建单个区块Frame
-        
-        Args:
-            parent: 父容器
-            title: 区块标题
-            is_header: 是否为头部信息区块
-        
-        Returns:
-            包含区块信息的字典
         """
         # 外层容器（带边框）
         container = tk.Frame(
@@ -523,10 +537,11 @@ class WindowTextExtractor:
         btn_container = tk.Frame(title_bar, bg='#e8e8e8')
         btn_container.pack(side=tk.RIGHT, padx=5)
 
-        # 创建文本框
+        # 文本框容器
         text_frame = tk.Frame(container, bg='white')
         text_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+        # 创建文本框
         text_widget = tk.Text(
             text_frame,
             font=("Consolas", 9),
@@ -537,9 +552,19 @@ class WindowTextExtractor:
             padx=5,
             pady=5
         )
-        text_widget.pack(fill=tk.BOTH, expand=True)
 
-        # 绑定Ctrl+A事件（只选中当前区块）
+        # 创建滚动条（默认先不显示，在 render_section_text 中根据需要显示）
+        text_scrollbar = tk.Scrollbar(
+            text_frame,
+            orient=tk.VERTICAL,
+            command=text_widget.yview
+        )
+        text_widget.config(yscrollcommand=text_scrollbar.set)
+
+        # 默认布局：只放置文本框，滚动条暂不放置
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # 绑定Ctrl+A事件
         text_widget.bind('<Control-a>', self.on_ctrl_a)
 
         # 创建复制按钮
@@ -573,6 +598,7 @@ class WindowTextExtractor:
             "title_label": title_label,
             "title": title,
             "text_widget": text_widget,
+            "text_scrollbar": text_scrollbar,
             "copy_with_btn": copy_with_btn,
             "copy_without_btn": copy_without_btn,
             "is_header": is_header,
@@ -591,38 +617,25 @@ class WindowTextExtractor:
         text_widget.tag_add(tk.SEL, "1.0", tk.END)
         text_widget.mark_set(tk.INSERT, "1.0")
         text_widget.see(tk.INSERT)
-        return "break"  # 阻止默认行为
+        return "break"
 
     def parse_result_text(self, text):
-        """
-        解析提取结果文本，分割为头部信息和各方法区块
-        
-        Args:
-            text: 原始提取结果文本
-        
-        Returns:
-            解析后的数据字典
-        """
+        """解析提取结果文本"""
         result = {
             "header": "",
             "sections": []
         }
 
-        # 分割文本
         parts = re.split(r'(【方法\d+：[^】]+】)', text)
         
-        # 提取头部信息（分隔线和窗口句柄等）
         header_match = re.search(r'^=+[\s\S]*?=+\n*', text)
         if header_match:
             result["header"] = header_match.group(0).strip()
 
-        # 提取各方法区块
         for i in range(1, len(parts), 2):
             if i + 1 < len(parts):
                 title = parts[i].strip()
                 content = parts[i + 1].strip()
-                
-                # 移除末尾的空行
                 content = content.rstrip('\n')
                 
                 result["sections"].append({
@@ -633,22 +646,25 @@ class WindowTextExtractor:
 
         return result
 
-    def render_section_text(self, text_widget, text):
+    def render_section_text(self, section_info, text):
         """
-        渲染带语法高亮的文本
+        渲染带语法高亮的文本，并根据模式控制高度和滚动条
+        """
+        text_widget = section_info["text_widget"]
+        scrollbar = section_info["text_scrollbar"]
         
-        Args:
-            text_widget: Text控件
-            text: 要渲染的文本
-        """
         text_widget.config(state=tk.NORMAL)
         text_widget.delete(1.0, tk.END)
 
         if not text:
             text_widget.insert(tk.END, "(无内容)")
             text_widget.config(state=tk.DISABLED)
+            # 无内容时隐藏滚动条
+            scrollbar.pack_forget()
+            text_widget.config(height=1)
             return
 
+        # 渲染高亮文本
         pattern = re.compile(r'(\[[\w\s]+\])')
         last_end = 0
 
@@ -675,9 +691,25 @@ class WindowTextExtractor:
 
         text_widget.config(state=tk.DISABLED)
 
-        # 动态调整高度
+        # 计算行数
         line_count = int(text_widget.index(tk.END).split('.')[0])
-        text_widget.config(height=max(3, min(line_count, 20)))
+        
+        # 根据高度限制模式处理
+        if self.limit_height:
+            # 限制模式：限制高度，超出显示滚动条
+            display_height = min(line_count, self.max_display_lines)
+            text_widget.config(height=display_height)
+            
+            if line_count > self.max_display_lines:
+                # 内容超出，显示滚动条
+                scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            else:
+                # 内容未超出，隐藏滚动条
+                scrollbar.pack_forget()
+        else:
+            # 无限制模式：完全展开，不显示滚动条
+            text_widget.config(height=line_count)
+            scrollbar.pack_forget()
 
     def update_filter_menu(self):
         """更新筛选菜单项"""
@@ -700,12 +732,10 @@ class WindowTextExtractor:
         self.current_filter = tag_type
         
         if tag_type is None:
-            # 显示全部
             self.filter_mb.config(text="筛选 ▼")
         else:
             self.filter_mb.config(text=f"筛选: [{tag_type}] ▼")
 
-        # 重新渲染所有区块
         self.render_all_sections()
 
     def render_all_sections(self):
@@ -713,10 +743,9 @@ class WindowTextExtractor:
         # 渲染头部信息
         header_text = self.sections_data.get("header", "")
         if self.current_filter:
-            # 筛选时也应用过滤
             header_text = self.get_filtered_text(header_text, self.current_filter)
         
-        self.render_section_text(self.header_frame["text_widget"], header_text)
+        self.render_section_text(self.header_frame, header_text)
         self.header_frame["container"].pack(fill=tk.X, padx=5, pady=5)
 
         # 渲染各方法区块
@@ -727,17 +756,15 @@ class WindowTextExtractor:
             frame = self.method_frames[i]
             content = section.get("content", "")
             
-            # 应用筛选
             if self.current_filter:
                 filtered_content = self.get_filtered_text(content, self.current_filter)
-                # 如果筛选后没有内容，隐藏该区块
                 if not filtered_content.strip():
                     frame["container"].pack_forget()
                     continue
                 content = filtered_content
 
             frame["container"].pack(fill=tk.X, padx=5, pady=5)
-            self.render_section_text(frame["text_widget"], content)
+            self.render_section_text(frame, content)
 
     def get_filtered_text(self, text, tag_type):
         """获取筛选后的文本"""
@@ -767,13 +794,7 @@ class WindowTextExtractor:
         return '\n'.join(filtered_lines)
 
     def copy_section(self, section_info, include_title=True):
-        """
-        复制单个区块内容
-        
-        Args:
-            section_info: 区块信息字典
-            include_title: 是否包含标题
-        """
+        """复制单个区块内容"""
         text_widget = section_info["text_widget"]
         text = text_widget.get(1.0, tk.END).strip()
         
@@ -786,7 +807,7 @@ class WindowTextExtractor:
         self.status_label.config(text="已复制到剪贴板", fg='#4caf50')
 
     def copy_original_text(self):
-        """复制完整的原始文本（底部按钮功能）"""
+        """复制完整的原始文本"""
         if self.full_result_text:
             self.root.clipboard_clear()
             self.root.clipboard_append(self.full_result_text)
@@ -1031,22 +1052,15 @@ class WindowTextExtractor:
 
     def update_result(self, text):
         """更新结果显示"""
-        # 保存完整原始文本
         self.full_result_text = text
-
-        # 解析文本为各个区块
         self.sections_data = self.parse_result_text(text)
 
-        # 提取所有标签类型
         self.available_tags = set()
         pattern = re.compile(r'\[([\w\s]+)\]')
         for match in pattern.finditer(text):
             self.available_tags.add(match.group(1))
 
-        # 更新筛选菜单
         self.update_filter_menu()
-
-        # 渲染所有区块
         self.render_all_sections()
 
     def clear_result(self):
@@ -1056,10 +1070,9 @@ class WindowTextExtractor:
         self.available_tags = set()
         self.current_filter = None
 
-        # 清空各区块文本
-        self.render_section_text(self.header_frame["text_widget"], "")
+        self.render_section_text(self.header_frame, "")
         for frame in self.method_frames:
-            self.render_section_text(frame["text_widget"], "")
+            self.render_section_text(frame, "")
             frame["container"].pack(fill=tk.X, padx=5, pady=5)
 
         self.filter_mb.config(text="筛选 ▼")
