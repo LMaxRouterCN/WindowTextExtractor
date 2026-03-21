@@ -1,15 +1,15 @@
 """
-窗口文本提取工具 v1.4.2
+窗口文本提取工具 v1.5.0
 功能：拖动按钮到目标窗口，提取该窗口内的所有文本
-优化：
-1. 修复多线程操作UI导致潜在崩溃的问题（线程安全）
-2. 结果文本框默认设为只读，防止误操作
-3. 移除未使用的代码常量，优化异常捕获逻辑
-4. 修复 GetWindowThreadProcessId 调用错误（应在 win32process 模块中）
+新增：
+1. 结果分区块显示（头部信息+各方法区块）
+2. 每个区块独立线框、独立复制按钮
+3. Ctrl+A只选中当前区块
+4. 底部"复制原始文本"按钮
 """
 
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, colorchooser
+from tkinter import messagebox, colorchooser
 import threading
 import ctypes
 from ctypes import wintypes
@@ -19,49 +19,55 @@ import re
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
+
 class WindowTextExtractor:
     """窗口文本提取器主类"""
 
     def __init__(self, root):
         """初始化主窗口"""
         self.root = root
-        self.root.title("窗口文本提取工具 v1.4.2")
+        self.root.title("窗口文本提取工具 v1.5.0")
         
         # 窗口尺寸设置
-        self.root.geometry("650x550")
+        self.root.geometry("700x600")
         self.root.minsize(500, 400)
         self.root.resizable(True, True)
 
         # 拖动状态标志
         self.is_dragging = False
-        self.drag_button = None
 
-        # 完整的原始结果文本（用于筛选）
+        # 完整的原始结果文本
         self.full_result_text = ""
+        
+        # 解析后的区块数据
+        self.sections_data = {
+            "header": "",      # 头部信息
+            "sections": []     # 各方法区块列表
+        }
         
         # 当前提取到的所有标签类型
         self.available_tags = set()
         
-        # 当前选中的筛选标签 (None 表示显示全部)
+        # 当前选中的筛选标签
         self.current_filter = None
 
         # 默认颜色配置（控件类型 -> 颜色）
         self.color_settings = {
-            "Button": "#2196F3",      # 蓝色
-            "Edit": "#9C27B0",        # 紫色
-            "Text": "#9C27B0",        # 紫色
-            "TreeItem": "#4CAF50",    # 绿色
-            "ComboBox": "#FF9800",    # 橙色
-            "List": "#FF9800",        # 橙色
-            "Document": "#795548",    # 棕色
-            "MenuItem": "#009688",    # 青色
-            "CheckBox": "#E91E63",    # 粉色
-            "RadioButton": "#E91E63", # 粉色
-            "Pane": "#607D8B",        # 蓝灰色
-            "Window": "#F44336",      # 红色
-            "Dialog": "#F44336",      # 红色
-            "Title": "#F44336",       # 红色
-            "default": "#333333"      # 默认颜色
+            "Button": "#2196F3",
+            "Edit": "#9C27B0",
+            "Text": "#9C27B0",
+            "TreeItem": "#4CAF50",
+            "ComboBox": "#FF9800",
+            "List": "#FF9800",
+            "Document": "#795548",
+            "MenuItem": "#009688",
+            "CheckBox": "#E91E63",
+            "RadioButton": "#E91E63",
+            "Pane": "#607D8B",
+            "Window": "#F44336",
+            "Dialog": "#F44336",
+            "Title": "#F44336",
+            "default": "#333333"
         }
 
         # 尝试导入依赖库
@@ -82,7 +88,6 @@ class WindowTextExtractor:
         self.has_win32gui = False
         self.has_win32process = False
 
-        # 尝试导入 win32gui（窗口操作相关）
         try:
             import win32gui
             import win32con
@@ -93,7 +98,6 @@ class WindowTextExtractor:
         except ImportError:
             print("✗ win32gui 未安装")
 
-        # 尝试导入 win32process（进程/线程相关）
         try:
             import win32process
             self.win32process = win32process
@@ -102,7 +106,6 @@ class WindowTextExtractor:
         except ImportError:
             print("✗ win32process 未安装")
 
-        # 尝试导入 pywinauto（UI Automation）
         try:
             from pywinauto import Desktop
             self.Desktop = Desktop
@@ -166,7 +169,6 @@ class WindowTextExtractor:
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        # 绑定鼠标滚轮事件
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         
@@ -181,10 +183,8 @@ class WindowTextExtractor:
         canvas.bind("<Enter>", _bind_to_mousewheel)
         canvas.bind("<Leave>", _unbind_from_mousewheel)
 
-        # 存储颜色标签引用
         color_labels = {}
 
-        # 创建每种类型的颜色设置行
         for ctrl_type, color in self.color_settings.items():
             if ctrl_type == "default":
                 continue
@@ -192,7 +192,6 @@ class WindowTextExtractor:
             row_frame = tk.Frame(scrollable_frame, padx=10, pady=5)
             row_frame.pack(fill=tk.X)
 
-            # 类型名称
             name_label = tk.Label(
                 row_frame,
                 text=f"[{ctrl_type}]",
@@ -202,7 +201,6 @@ class WindowTextExtractor:
             )
             name_label.pack(side=tk.LEFT)
 
-            # 颜色显示块（可点击）
             color_label = tk.Label(
                 row_frame,
                 bg=color,
@@ -214,7 +212,6 @@ class WindowTextExtractor:
             color_label.pack(side=tk.LEFT, padx=10)
             color_labels[ctrl_type] = color_label
 
-            # 绑定点击事件
             def make_callback(ctrl_type, label):
                 def callback(event):
                     color = colorchooser.askcolor(
@@ -229,7 +226,6 @@ class WindowTextExtractor:
             
             color_label.bind("<Button-1>", make_callback(ctrl_type, color_label))
 
-            # 颜色代码显示
             hex_label = tk.Label(
                 row_frame,
                 text=color,
@@ -238,7 +234,6 @@ class WindowTextExtractor:
             )
             hex_label.pack(side=tk.LEFT)
 
-            # 更新 hex_label 的回调
             def make_hex_updater(label, color_label):
                 def updater(event):
                     label.config(text=color_label.cget("bg"))
@@ -249,12 +244,10 @@ class WindowTextExtractor:
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # 底部按钮
         btn_frame = tk.Frame(settings_window)
         btn_frame.pack(fill=tk.X, pady=10)
 
         def apply_colors():
-            """应用颜色到结果文本"""
             self.apply_tag_colors()
             messagebox.showinfo("成功", "颜色设置已应用！", parent=settings_window)
 
@@ -277,17 +270,21 @@ class WindowTextExtractor:
         close_btn.pack(side=tk.RIGHT)
 
     def apply_tag_colors(self):
-        """应用颜色设置到文本框的标签"""
+        """应用颜色设置到所有区块的文本标签"""
         for ctrl_type, color in self.color_settings.items():
             tag_name = f"tag_{ctrl_type}"
-            self.result_text.tag_configure(tag_name, foreground=color)
+            # 应用到所有区块的文本框
+            for section in self.sections_data["sections"]:
+                if "text_widget" in section:
+                    section["text_widget"].tag_configure(tag_name, foreground=color)
 
     def show_about(self):
         """显示关于对话框"""
         messagebox.showinfo(
             "关于",
-            "窗口文本提取工具 v1.4.2\n\n"
+            "窗口文本提取工具 v1.5.0\n\n"
             "功能：拖动按钮到目标窗口，提取所有文本\n"
+            "支持分区块显示、独立复制\n"
             "支持语法高亮显示控件类型标签\n"
             "支持结果筛选过滤\n\n"
             "依赖库：\n"
@@ -311,11 +308,12 @@ class WindowTextExtractor:
         )
         clear_button.pack(side=tk.LEFT, padx=5)
 
+        # 改为"复制原始文本"
         copy_button = tk.Button(
             bottom_frame,
-            text="复制文本",
+            text="复制原始文本",
             font=("微软雅黑", 9),
-            command=self.copy_result,
+            command=self.copy_original_text,
             width=12
         )
         copy_button.pack(side=tk.LEFT, padx=5)
@@ -362,7 +360,6 @@ class WindowTextExtractor:
         )
         self.drag_button.pack(pady=10)
 
-        # 绑定鼠标事件
         self.drag_button.bind('<Button-1>', self.on_drag_start)
         self.drag_button.bind('<B1-Motion>', self.on_drag_motion)
         self.drag_button.bind('<ButtonRelease-1>', self.on_drag_release)
@@ -376,17 +373,18 @@ class WindowTextExtractor:
         )
         hint_label.pack(pady=5)
 
-        # ========== 4. 结果显示区域 ==========
+        # ========== 4. 结果显示区域（使用Canvas滚动） ==========
         result_container = tk.Frame(self.root)
         result_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        # 标题栏
-        result_header = tk.Frame(result_container, bg='#e0e0e0', height=30)
-        result_header.pack(fill=tk.X)
-        result_header.pack_propagate(False)
+        # 顶部工具栏（筛选按钮）
+        toolbar = tk.Frame(result_container, bg='#e0e0e0', height=30)
+        toolbar.pack(fill=tk.X)
+        toolbar.pack_propagate(False)
 
+        # 左侧标题
         header_label = tk.Label(
-            result_header,
+            toolbar,
             text="提取结果",
             font=("微软雅黑", 10, "bold"),
             bg='#e0e0e0',
@@ -396,7 +394,7 @@ class WindowTextExtractor:
 
         # 筛选按钮
         self.filter_mb = tk.Menubutton(
-            result_header,
+            toolbar,
             text="筛选 ▼",
             font=("微软雅黑", 9),
             bg='#e0e0e0',
@@ -421,38 +419,276 @@ class WindowTextExtractor:
         
         self.filter_mb.bind("<Enter>", show_menu)
 
-        # 文本框容器
-        text_frame = tk.Frame(result_container)
-        text_frame.pack(fill=tk.BOTH, expand=True)
+        # 创建滚动Canvas
+        canvas_frame = tk.Frame(result_container)
+        canvas_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 创建滚动文本框
-        self.result_text = scrolledtext.ScrolledText(
+        self.result_canvas = tk.Canvas(canvas_frame, bg='#f5f5f5', highlightthickness=0)
+        scrollbar = tk.Scrollbar(canvas_frame, orient="vertical", command=self.result_canvas.yview)
+        
+        self.scrollable_frame = tk.Frame(self.result_canvas, bg='#f5f5f5')
+        
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.result_canvas.configure(scrollregion=self.result_canvas.bbox("all"))
+        )
+
+        self.result_canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw", width=660)
+        self.result_canvas.configure(yscrollcommand=scrollbar.set)
+
+        self.result_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 绑定Canvas宽度变化
+        def configure_scroll_region(event):
+            self.result_canvas.itemconfig("all", width=event.width)
+        
+        self.result_canvas.bind("<Configure>", configure_scroll_region)
+
+        # 鼠标滚轮绑定
+        def _on_mousewheel(event):
+            self.result_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        self.result_canvas.bind("<MouseWheel>", _on_mousewheel)
+
+        # 创建各个区块Frame（初始为空）
+        self.create_section_frames()
+
+    def create_section_frames(self):
+        """创建各个区块的Frame"""
+        # 清空现有区块
+        for widget in self.scrollable_frame.winfo_children():
+            widget.destroy()
+
+        # 1. 头部信息区块
+        self.header_frame = self.create_section_frame(
+            self.scrollable_frame,
+            "📋 窗口信息",
+            is_header=True
+        )
+
+        # 2. 方法区块列表
+        self.method_frames = []
+        
+        method_titles = [
+            "【方法1：pywinauto - UI Automation】",
+            "【方法2：win32gui - 枚举子窗口】",
+            "【方法3：win32gui - 窗口基本信息】",
+            "【方法4：递归枚举所有控件】"
+        ]
+
+        for title in method_titles:
+            frame = self.create_section_frame(self.scrollable_frame, title)
+            self.method_frames.append(frame)
+
+    def create_section_frame(self, parent, title, is_header=False):
+        """
+        创建单个区块Frame
+        
+        Args:
+            parent: 父容器
+            title: 区块标题
+            is_header: 是否为头部信息区块
+        
+        Returns:
+            包含区块信息的字典
+        """
+        # 外层容器（带边框）
+        container = tk.Frame(
+            parent,
+            bg='white',
+            relief=tk.GROOVE,
+            bd=2,
+            padx=0,
+            pady=0
+        )
+        container.pack(fill=tk.X, padx=5, pady=5)
+
+        # 标题栏
+        title_bar = tk.Frame(container, bg='#e8e8e8', height=32)
+        title_bar.pack(fill=tk.X)
+        title_bar.pack_propagate(False)
+
+        # 标题标签
+        title_label = tk.Label(
+            title_bar,
+            text=title,
+            font=("微软雅黑", 9, "bold"),
+            bg='#e8e8e8',
+            fg='#333333'
+        )
+        title_label.pack(side=tk.LEFT, padx=5)
+
+        # 复制按钮容器（右侧）
+        btn_container = tk.Frame(title_bar, bg='#e8e8e8')
+        btn_container.pack(side=tk.RIGHT, padx=5)
+
+        # 创建文本框
+        text_frame = tk.Frame(container, bg='white')
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        text_widget = tk.Text(
             text_frame,
-            font=("Consolas", 10),
+            font=("Consolas", 9),
             wrap=tk.WORD,
             bg='#fafafa',
-            state=tk.DISABLED  # 默认设为禁用（只读），防止误编辑
+            height=4,  # 初始高度
+            relief=tk.FLAT,
+            padx=5,
+            pady=5
         )
-        self.result_text.pack(fill=tk.BOTH, expand=True)
+        text_widget.pack(fill=tk.BOTH, expand=True)
+
+        # 绑定Ctrl+A事件（只选中当前区块）
+        text_widget.bind('<Control-a>', self.on_ctrl_a)
+
+        # 创建复制按钮
+        copy_with_btn = tk.Button(
+            btn_container,
+            text="📋含标题",
+            font=("微软雅黑", 8),
+            relief=tk.FLAT,
+            bg='#e8e8e8',
+            fg='#666666',
+            activebackground='#d0d0d0',
+            cursor='hand2'
+        )
+        copy_with_btn.pack(side=tk.LEFT, padx=2)
+
+        copy_without_btn = tk.Button(
+            btn_container,
+            text="📄纯内容",
+            font=("微软雅黑", 8),
+            relief=tk.FLAT,
+            bg='#e8e8e8',
+            fg='#666666',
+            activebackground='#d0d0d0',
+            cursor='hand2'
+        )
+        copy_without_btn.pack(side=tk.LEFT, padx=2)
+
+        # 返回区块信息字典
+        section_info = {
+            "container": container,
+            "title_label": title_label,
+            "title": title,
+            "text_widget": text_widget,
+            "copy_with_btn": copy_with_btn,
+            "copy_without_btn": copy_without_btn,
+            "is_header": is_header,
+            "visible": True
+        }
+
+        # 绑定复制按钮事件
+        copy_with_btn.config(command=lambda: self.copy_section(section_info, include_title=True))
+        copy_without_btn.config(command=lambda: self.copy_section(section_info, include_title=False))
+
+        return section_info
+
+    def on_ctrl_a(self, event):
+        """处理Ctrl+A事件，只选中当前区块"""
+        text_widget = event.widget
+        text_widget.tag_add(tk.SEL, "1.0", tk.END)
+        text_widget.mark_set(tk.INSERT, "1.0")
+        text_widget.see(tk.INSERT)
+        return "break"  # 阻止默认行为
+
+    def parse_result_text(self, text):
+        """
+        解析提取结果文本，分割为头部信息和各方法区块
         
-        self.set_result_text("等待拖动操作...\n")
+        Args:
+            text: 原始提取结果文本
         
-        # 初始化颜色标签
-        self.apply_tag_colors()
+        Returns:
+            解析后的数据字典
+        """
+        result = {
+            "header": "",
+            "sections": []
+        }
+
+        # 分割文本
+        parts = re.split(r'(【方法\d+：[^】]+】)', text)
+        
+        # 提取头部信息（分隔线和窗口句柄等）
+        header_match = re.search(r'^=+[\s\S]*?=+\n*', text)
+        if header_match:
+            result["header"] = header_match.group(0).strip()
+
+        # 提取各方法区块
+        for i in range(1, len(parts), 2):
+            if i + 1 < len(parts):
+                title = parts[i].strip()
+                content = parts[i + 1].strip()
+                
+                # 移除末尾的空行
+                content = content.rstrip('\n')
+                
+                result["sections"].append({
+                    "title": title,
+                    "content": content,
+                    "visible": True
+                })
+
+        return result
+
+    def render_section_text(self, text_widget, text):
+        """
+        渲染带语法高亮的文本
+        
+        Args:
+            text_widget: Text控件
+            text: 要渲染的文本
+        """
+        text_widget.config(state=tk.NORMAL)
+        text_widget.delete(1.0, tk.END)
+
+        if not text:
+            text_widget.insert(tk.END, "(无内容)")
+            text_widget.config(state=tk.DISABLED)
+            return
+
+        pattern = re.compile(r'(\[[\w\s]+\])')
+        last_end = 0
+
+        for match in pattern.finditer(text):
+            start = match.start()
+            end = match.end()
+
+            if start > last_end:
+                text_widget.insert(tk.END, text[last_end:start])
+
+            tag_content = match.group(1)
+            ctrl_type = tag_content[1:-1]
+            tag_name = f"tag_{ctrl_type}"
+
+            if ctrl_type not in self.color_settings:
+                self.color_settings[ctrl_type] = self.color_settings.get("default", "#333333")
+            
+            text_widget.tag_configure(tag_name, foreground=self.color_settings[ctrl_type])
+            text_widget.insert(tk.END, tag_content, tag_name)
+            last_end = end
+
+        if last_end < len(text):
+            text_widget.insert(tk.END, text[last_end:])
+
+        text_widget.config(state=tk.DISABLED)
+
+        # 动态调整高度
+        line_count = int(text_widget.index(tk.END).split('.')[0])
+        text_widget.config(height=max(3, min(line_count, 20)))
 
     def update_filter_menu(self):
         """更新筛选菜单项"""
-        # 清空旧菜单
         self.filter_menu.delete(0, tk.END)
 
-        # 添加"显示全部"选项
         self.filter_menu.add_command(
             label="📋 显示全部",
             command=lambda: self.apply_filter(None)
         )
         self.filter_menu.add_separator()
 
-        # 添加标签类型选项（按字母排序）
         for tag in sorted(self.available_tags):
             self.filter_menu.add_command(
                 label=f"[{tag}]",
@@ -462,41 +698,66 @@ class WindowTextExtractor:
     def apply_filter(self, tag_type):
         """应用筛选过滤"""
         self.current_filter = tag_type
-        if not self.full_result_text:
-            return
-
+        
         if tag_type is None:
             # 显示全部
-            self.render_text(self.full_result_text)
             self.filter_mb.config(text="筛选 ▼")
         else:
-            # 筛选特定标签
-            filtered_text = self.get_filtered_text(self.full_result_text, tag_type)
-            self.render_text(filtered_text)
             self.filter_mb.config(text=f"筛选: [{tag_type}] ▼")
+
+        # 重新渲染所有区块
+        self.render_all_sections()
+
+    def render_all_sections(self):
+        """渲染所有区块"""
+        # 渲染头部信息
+        header_text = self.sections_data.get("header", "")
+        if self.current_filter:
+            # 筛选时也应用过滤
+            header_text = self.get_filtered_text(header_text, self.current_filter)
+        
+        self.render_section_text(self.header_frame["text_widget"], header_text)
+        self.header_frame["container"].pack(fill=tk.X, padx=5, pady=5)
+
+        # 渲染各方法区块
+        for i, section in enumerate(self.sections_data.get("sections", [])):
+            if i >= len(self.method_frames):
+                break
+
+            frame = self.method_frames[i]
+            content = section.get("content", "")
+            
+            # 应用筛选
+            if self.current_filter:
+                filtered_content = self.get_filtered_text(content, self.current_filter)
+                # 如果筛选后没有内容，隐藏该区块
+                if not filtered_content.strip():
+                    frame["container"].pack_forget()
+                    continue
+                content = filtered_content
+
+            frame["container"].pack(fill=tk.X, padx=5, pady=5)
+            self.render_section_text(frame["text_widget"], content)
 
     def get_filtered_text(self, text, tag_type):
         """获取筛选后的文本"""
         lines = text.split('\n')
         filtered_lines = []
 
-        # 总是保留的行（头部信息）
         keep_patterns = [
-            r'^=+$',            # 分隔线
+            r'^=+$',
             r'^窗口句柄:',
             r'^鼠标位置:',
-            r'^【方法\d+：',    # 方法标题
+            r'^【方法\d+：',
         ]
 
         for line in lines:
             should_keep = False
-            # 检查是否为保留行
             for pattern in keep_patterns:
                 if re.match(pattern, line):
                     should_keep = True
                     break
             
-            # 或者包含目标标签
             if f'[{tag_type}]' in line:
                 should_keep = True
 
@@ -504,6 +765,34 @@ class WindowTextExtractor:
                 filtered_lines.append(line)
 
         return '\n'.join(filtered_lines)
+
+    def copy_section(self, section_info, include_title=True):
+        """
+        复制单个区块内容
+        
+        Args:
+            section_info: 区块信息字典
+            include_title: 是否包含标题
+        """
+        text_widget = section_info["text_widget"]
+        text = text_widget.get(1.0, tk.END).strip()
+        
+        if include_title:
+            title = section_info["title"]
+            text = f"{title}\n{text}"
+        
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.status_label.config(text="已复制到剪贴板", fg='#4caf50')
+
+    def copy_original_text(self):
+        """复制完整的原始文本（底部按钮功能）"""
+        if self.full_result_text:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.full_result_text)
+            self.status_label.config(text="已复制原始文本", fg='#4caf50')
+        else:
+            self.status_label.config(text="无内容可复制", fg='#f44336')
 
     def on_drag_start(self, event):
         """拖动开始事件"""
@@ -528,23 +817,19 @@ class WindowTextExtractor:
         self.status_label.config(text="正在提取文本...", fg='#4a90e2')
         self.root.update()
 
-        # 获取屏幕坐标
         x = self.root.winfo_pointerx()
         y = self.root.winfo_pointery()
 
-        # 在新线程中提取文本
         thread = threading.Thread(target=self.extract_text_at_position, args=(x, y))
         thread.daemon = True
         thread.start()
 
     def extract_text_at_position(self, x, y):
-        """在指定屏幕位置提取窗口文本 (运行在后台线程)"""
+        """在指定屏幕位置提取窗口文本"""
         try:
-            # 优先使用 win32gui 获取窗口句柄
             if self.has_win32gui:
                 hwnd = self.win32gui.WindowFromPoint((x, y))
             else:
-                # 备用方案：使用 ctypes
                 class POINT(ctypes.Structure):
                     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
                 
@@ -556,17 +841,14 @@ class WindowTextExtractor:
                 self.safe_update_ui("未找到窗口", "提取失败", "🎯 拖动我到目标窗口")
                 return
 
-            # 获取顶层父窗口
             root_hwnd = self.get_root_window(hwnd)
 
-            # 收集所有文本
             all_texts = []
             all_texts.append(f"{'='*60}")
             all_texts.append(f"窗口句柄: {root_hwnd} (0x{root_hwnd:X})")
             all_texts.append(f"鼠标位置: ({x}, {y})")
             all_texts.append(f"{'='*60}\n")
 
-            # 方法1：使用pywinauto
             if self.has_pywinauto:
                 all_texts.append("【方法1：pywinauto - UI Automation】")
                 try:
@@ -576,7 +858,6 @@ class WindowTextExtractor:
                     all_texts.append(f" 错误: {str(e)}")
                 all_texts.append("")
 
-            # 方法2：使用win32gui枚举子窗口
             if self.has_win32gui:
                 all_texts.append("【方法2：win32gui - 枚举子窗口】")
                 try:
@@ -586,7 +867,6 @@ class WindowTextExtractor:
                     all_texts.append(f" 错误: {str(e)}")
                 all_texts.append("")
 
-            # 方法3：使用win32gui获取窗口标题和类名
             if self.has_win32gui:
                 all_texts.append("【方法3：win32gui - 窗口基本信息】")
                 try:
@@ -596,7 +876,6 @@ class WindowTextExtractor:
                     all_texts.append(f" 错误: {str(e)}")
                 all_texts.append("")
 
-            # 方法4：递归枚举所有子窗口控件
             if self.has_win32gui:
                 all_texts.append("【方法4：递归枚举所有控件】")
                 try:
@@ -613,10 +892,7 @@ class WindowTextExtractor:
             self.safe_update_ui(f"提取失败: {str(e)}", "提取失败", "🎯 拖动我到目标窗口")
 
     def safe_update_ui(self, result_text, status_text, button_text):
-        """
-        线程安全地更新UI
-        使用 root.after 将更新操作调度到主线程
-        """
+        """线程安全地更新UI"""
         def update():
             self.drag_button.config(state=tk.NORMAL, text=button_text)
             self.status_label.config(text=status_text, fg='#4caf50' if "完成" in status_text else '#f44336')
@@ -650,7 +926,6 @@ class WindowTextExtractor:
                 pass
 
             try:
-                # 增加异常捕获，防止个别控件导致遍历中断
                 for control in window.descendants():
                     try:
                         text = control.window_text()
@@ -658,7 +933,6 @@ class WindowTextExtractor:
                             ctrl_type = control.element_info.control_type
                             texts.append(f" [{ctrl_type}] {text}")
                     except Exception:
-                        # 忽略无法访问的控件
                         continue
             except Exception as e:
                 texts.append(f" 遍历控件时出错: {str(e)}")
@@ -679,10 +953,10 @@ class WindowTextExtractor:
             class_name = self.win32gui.GetClassName(child_hwnd)
             
             try:
-                length = user32.SendMessageW(child_hwnd, 0x000E, 0, 0) # WM_GETTEXTLENGTH
+                length = user32.SendMessageW(child_hwnd, 0x000E, 0, 0)
                 if length > 0:
                     buffer = ctypes.create_unicode_buffer(length + 1)
-                    user32.SendMessageW(child_hwnd, 0x000D, length + 1, buffer) # WM_GETTEXT
+                    user32.SendMessageW(child_hwnd, 0x000D, length + 1, buffer)
                     msg_text = buffer.value
                     if msg_text and msg_text != text:
                         text = msg_text
@@ -701,24 +975,18 @@ class WindowTextExtractor:
         """提取窗口基本信息"""
         texts = []
         
-        # 窗口标题
         title = self.win32gui.GetWindowText(hwnd)
         texts.append(f" 窗口标题: {title if title else '(无)'}")
         
-        # 窗口类名
         class_name = self.win32gui.GetClassName(hwnd)
         texts.append(f" 窗口类名: {class_name}")
         
-        # 窗口位置
         rect = self.win32gui.GetWindowRect(hwnd)
         texts.append(f" 窗口位置: {rect}")
         
-        # 控件ID
         window_id = self.win32gui.GetDlgCtrlID(hwnd)
         texts.append(f" 控件ID: {window_id}")
         
-        # 进程ID和线程ID（使用 win32process 模块）
-        # 修复：GetWindowThreadProcessId 在 win32process 模块中，而非 win32gui
         if self.has_win32process:
             try:
                 thread_id, process_id = self.win32process.GetWindowThreadProcessId(hwnd)
@@ -761,17 +1029,13 @@ class WindowTextExtractor:
         recursive_enum(hwnd, 0)
         return texts
 
-    def set_result_text(self, text):
-        """设置结果文本（处理只读状态）"""
-        self.result_text.config(state=tk.NORMAL)
-        self.result_text.delete(1.0, tk.END)
-        self.result_text.insert(tk.END, text)
-        self.result_text.config(state=tk.DISABLED)
-
     def update_result(self, text):
-        """更新结果显示（带语法高亮）"""
-        # 保存完整文本
+        """更新结果显示"""
+        # 保存完整原始文本
         self.full_result_text = text
+
+        # 解析文本为各个区块
+        self.sections_data = self.parse_result_text(text)
 
         # 提取所有标签类型
         self.available_tags = set()
@@ -782,71 +1046,25 @@ class WindowTextExtractor:
         # 更新筛选菜单
         self.update_filter_menu()
 
-        # 检查并应用当前筛选状态
-        if self.current_filter and self.current_filter in self.available_tags:
-            filtered_text = self.get_filtered_text(text, self.current_filter)
-            self.render_text(filtered_text)
-            self.filter_mb.config(text=f"筛选: [{self.current_filter}] ▼")
-        else:
-            if self.current_filter:
-                self.current_filter = None
-                self.filter_mb.config(text="筛选 ▼")
-            self.render_text(text)
-
-    def render_text(self, text):
-        """渲染文本（带语法高亮）"""
-        # 解锁文本框
-        self.result_text.config(state=tk.NORMAL)
-        self.result_text.delete(1.0, tk.END)
-
-        pattern = re.compile(r'(\[[\w\s]+\])')
-        last_end = 0
-
-        for match in pattern.finditer(text):
-            start = match.start()
-            end = match.end()
-
-            # 插入匹配前的普通文本
-            if start > last_end:
-                self.result_text.insert(tk.END, text[last_end:start])
-
-            tag_content = match.group(1)
-            ctrl_type = tag_content[1:-1]
-
-            # 确定使用的颜色标签
-            tag_name = f"tag_{ctrl_type}"
-
-            if ctrl_type not in self.color_settings:
-                self.color_settings[ctrl_type] = self.color_settings.get("default", "#333333")
-                self.result_text.tag_configure(tag_name, foreground=self.color_settings[ctrl_type])
-
-            self.result_text.insert(tk.END, tag_content, tag_name)
-            last_end = end
-
-        # 插入剩余的普通文本
-        if last_end < len(text):
-            self.result_text.insert(tk.END, text[last_end:])
-
-        self.result_text.see(tk.END)
-        # 锁定文本框
-        self.result_text.config(state=tk.DISABLED)
+        # 渲染所有区块
+        self.render_all_sections()
 
     def clear_result(self):
         """清空结果"""
         self.full_result_text = ""
+        self.sections_data = {"header": "", "sections": []}
         self.available_tags = set()
         self.current_filter = None
-        self.set_result_text("等待拖动操作...\n")
+
+        # 清空各区块文本
+        self.render_section_text(self.header_frame["text_widget"], "")
+        for frame in self.method_frames:
+            self.render_section_text(frame["text_widget"], "")
+            frame["container"].pack(fill=tk.X, padx=5, pady=5)
+
         self.filter_mb.config(text="筛选 ▼")
         self.status_label.config(text="就绪", fg='#666666')
 
-    def copy_result(self):
-        """复制结果到剪贴板"""
-        # 获取实际显示的文本（包括筛选后的）
-        text = self.result_text.get(1.0, tk.END)
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-        self.status_label.config(text="已复制到剪贴板", fg='#4caf50')
 
 def main():
     """主函数"""
@@ -863,6 +1081,7 @@ def main():
         
     app = WindowTextExtractor(root)
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()
