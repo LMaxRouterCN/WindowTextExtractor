@@ -4,7 +4,9 @@
 [![Version](https://img.shields.io/badge/Version-v1.6.3-blue.svg)](https://github.com/LMaxRouterCN/window-text-extractor)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-brightgreen.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MPL_2.0-yellow.svg)](LICENSE)
+
 一款通过拖拽定位，快速提取 Windows 窗口内所有文本信息的桌面工具。
+
 ![界面预览](preview.png) 
 
 ---
@@ -95,4 +97,3 @@
 ---
 ## 📄 许可证
 本项目基于 [MPL 2.0 License](LICENSE) 开源。
-```
