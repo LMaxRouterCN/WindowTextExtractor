@@ -1,7 +1,6 @@
 
 # 🔍 窗口文本提取工具 (Window Text Extractor)
 
-[![Version](https://img.shields.io/badge/Version-v1.6.3-blue.svg)](https://github.com/LMaxRouterCN/window-text-extractor)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-brightgreen.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MPL_2.0-yellow.svg)](LICENSE)
 
@@ -30,12 +29,12 @@
 
 ## 🚀 快速开始
 ### 方式一：直接运行 (推荐普通用户)
-1.  前往 [Releases](https://github.com/LMaxRouterCN/window-text-extractor/releases) 页面下载最新的 `窗口文本提取工具.exe`。
+1.  前往 [Releases](https://github.com/LMaxRouterCN/WindowTextExtractor/releases) 页面下载最新的 `窗口文本提取工具.exe`。
 2.  双击运行即可，无需安装 Python 环境。
 ### 方式二：源码运行 (开发者)
 1.  **克隆仓库**
     ```bash
-    git clone https://github.com/LMaxRouterCN/window-text-extractor.git
+    git clone https://github.com/LMaxRouterCN/WindowTextExtractor.git
     cd window-text-extractor
     ```
 2.  **安装依赖**
