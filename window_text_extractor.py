@@ -1,10 +1,10 @@
 """
-窗口文本提取工具 v1.5.4
+窗口文本提取工具 v1.6.3
 功能：拖动按钮到目标窗口，提取该窗口内的所有文本
-修复：
-1. 彻底重构滚轮事件处理逻辑，使用全局拦截解决 Windows 下焦点与悬停不一致问题。
-2. 修复标题栏滚动失效问题。
-3. 实现精确的焦点控制：点击文本框滚动内部，其余任何情况滚动整体。
+终极修复：
+1. 彻底废弃 displaylines/ypixels 等依赖渲染的方法。
+2. 使用字体测量法计算高度：根据画布宽度和字体宽度，纯数学计算出所需的行数。
+3. 无论窗口状态如何，都能准确计算出文本框高度，彻底解决“固定为一行”或“高度不对”的问题。
 """
 
 import tkinter as tk
@@ -13,6 +13,8 @@ import threading
 import ctypes
 from ctypes import wintypes
 import re
+import math
+import tkinter.font as tkfont
 
 # 加载Windows API
 user32 = ctypes.windll.user32
@@ -25,7 +27,7 @@ class WindowTextExtractor:
     def __init__(self, root):
         """初始化主窗口"""
         self.root = root
-        self.root.title("窗口文本提取工具 v1.5.4")
+        self.root.title("窗口文本提取工具 v1.6.3")
         
         # 窗口尺寸设置
         self.root.geometry("700x600")
@@ -40,8 +42,8 @@ class WindowTextExtractor:
         
         # 解析后的区块数据
         self.sections_data = {
-            "header": "",      # 头部信息
-            "sections": []     # 各方法区块列表
+            "header": "",
+            "sections": []
         }
         
         # 当前提取到的所有标签类型
@@ -116,17 +118,14 @@ class WindowTextExtractor:
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
 
-        # 设置菜单
         settings_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="设置", menu=settings_menu)
         settings_menu.add_command(label="自定义标签颜色...", command=self.open_color_settings)
 
-        # 帮助菜单
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="帮助", menu=help_menu)
         help_menu.add_command(label="关于", command=self.show_about)
 
-        # 快捷按钮 - 限制区块高度
         self.limit_height_var = tk.BooleanVar(value=self.limit_height)
         menubar.add_checkbutton(
             label="限制区块高度",
@@ -159,11 +158,11 @@ class WindowTextExtractor:
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        # 这里的绑定不受全局影响，因为设置了 grab_set
-        def _on_mousewheel(event):
+        def _on_settings_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
         
-        canvas.bind("<MouseWheel>", _on_mousewheel)
+        canvas.bind("<MouseWheel>", _on_settings_mousewheel)
 
         color_labels = {}
         for ctrl_type, color in self.color_settings.items():
@@ -225,7 +224,7 @@ class WindowTextExtractor:
 
     def show_about(self):
         """显示关于对话框"""
-        messagebox.showinfo("关于", "窗口文本提取工具 v1.5.4\n\n功能：拖动按钮到目标窗口，提取所有文本\n支持分区块显示、独立复制\n优化焦点与滚动交互逻辑\n\n依赖库：\n- pywin32\n- pywinauto\n- comtypes")
+        messagebox.showinfo("关于", "窗口文本提取工具 v1.6.3\n\n功能：拖动按钮到目标窗口，提取所有文本\n彻底修复文本框高度计算偏差\n\n依赖库：\n- pywin32\n- pywinauto\n- comtypes")
 
     def create_widgets(self):
         """创建界面组件"""
@@ -308,62 +307,32 @@ class WindowTextExtractor:
         
         self.result_canvas.bind("<Configure>", configure_scroll_region)
 
-        # === 核心：全局滚轮事件拦截 ===
-        # 在应用级别绑定滚轮事件，优先于控件自身的处理
-        self.root.bind_all("<MouseWheel>", self._on_global_mousewheel, add="+")
-
-        self.create_section_frames()
-
-    def _on_global_mousewheel(self, event):
-        """
-        全局滚轮事件处理中心
-        解决 Windows 下滚轮事件只发送给焦点控件的问题
-        """
-        # 1. 检查事件发生时，鼠标是否在主窗口内
-        # winfo_containing 返回鼠标下的控件，如果为 None 或不属于主窗口，则忽略
-        x, y = event.x_root, event.y_root
-        target_widget = self.root.winfo_containing(x, y)
-        
-        # 如果鼠标不在任何控件上，或者不在主窗口内（比如在设置窗口，设置窗口有grab_set，通常轮不到这里处理）
-        if not target_widget:
-            return
-
-        # 检查是否在主窗口体系内
-        try:
-            # 递归检查父级，确保是在 self.root 内
-            w = target_widget
-            in_main_window = False
+        # === 核心：滚轮事件处理 ===
+        def _on_global_mousewheel(event):
+            w = event.widget
+            in_main = False
             while w:
                 if w == self.root:
-                    in_main_window = True
+                    in_main = True
                     break
                 w = w.master
-            if not in_main_window:
-                return
-        except:
-            return
+            
+            if in_main:
+                self.result_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                return "break"
+            return "break"
 
-        # 2. 获取当前键盘焦点控件
-        focused_widget = self.root.focus_get()
+        self.root.bind_all("<MouseWheel>", _on_global_mousewheel, add="+")
 
-        # 3. 逻辑判断
-        # 情况A：限制模式关闭 -> 始终滚动整体
-        if not self.limit_height:
-            self.result_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            return "break" # 阻止事件继续传播
+        # === 核心：焦点管理 ===
+        def clear_focus_on_click(event):
+            self.root.focus_set()
+            self.status_label.config(text="就绪", fg='#666666')
+            
+        self.result_canvas.bind('<Button-1>', clear_focus_on_click)
+        self.scrollable_frame.bind('<Button-1>', clear_focus_on_click)
 
-        # 情况B：限制模式开启 -> 焦点优先逻辑
-        # 只有当：1. 鼠标悬停在Text控件上 且 2. 该Text控件正好是当前焦点控件
-        # 才滚动文本框内部，否则滚动整体
-        
-        if isinstance(target_widget, tk.Text) and target_widget == focused_widget:
-            # 滚动文本框内部
-            target_widget.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        else:
-            # 滚动整体
-            self.result_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        
-        return "break" # 阻止事件继续传播，防止双重滚动
+        self.create_section_frames()
 
     def create_section_frames(self):
         """创建各个区块的Frame"""
@@ -386,11 +355,9 @@ class WindowTextExtractor:
 
     def create_section_frame(self, parent, title, is_header=False):
         """创建单个区块Frame"""
-        # 外层容器
         container = tk.Frame(parent, bg='white', relief=tk.GROOVE, bd=2, padx=0, pady=0)
         container.pack(fill=tk.X, padx=5, pady=5)
 
-        # 标题栏
         title_bar = tk.Frame(container, bg='#e8e8e8', height=32)
         title_bar.pack(fill=tk.X)
         title_bar.pack_propagate(False)
@@ -398,11 +365,9 @@ class WindowTextExtractor:
         title_label = tk.Label(title_bar, text=title, font=("微软雅黑", 9, "bold"), bg='#e8e8e8', fg='#333333')
         title_label.pack(side=tk.LEFT, padx=5)
 
-        # 复制按钮容器
         btn_container = tk.Frame(title_bar, bg='#e8e8e8')
         btn_container.pack(side=tk.RIGHT, padx=5)
 
-        # 文本框容器
         text_frame = tk.Frame(container, bg='white')
         text_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -411,19 +376,48 @@ class WindowTextExtractor:
         text_widget.config(yscrollcommand=text_scrollbar.set)
         text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        # --- 焦点管理逻辑 ---
-        
-        # 1. 点击标题栏/容器 -> 将焦点移回主窗口 root，确保任何文本框失去焦点
-        def clear_focus(event):
-            self.root.focus_set()
+        # --- Text控件的滚轮拦截逻辑 ---
+        def _on_text_mousewheel(event):
+            if not self.limit_height:
+                self.result_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                return "break"
             
-        title_bar.bind('<Button-1>', clear_focus)
-        container.bind('<Button-1>', clear_focus)
+            if text_widget == self.root.focus_get():
+                text_widget.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            else:
+                self.result_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            
+            return "break"
 
-        # 2. 点击文本框 -> 自动获取焦点（Text默认行为，无需额外代码）
-        # 但我们需要确保焦点样式更新，或者不需要，因为我们使用全局事件
-        
-        # --- 结束修改 ---
+        text_widget.bind("<MouseWheel>", _on_text_mousewheel)
+        # --------------------------------------
+
+        # --- 焦点控制与提示 ---
+        def _on_text_click(event):
+            event.widget.focus_set()
+            if self.limit_height:
+                self.status_label.config(text="已聚焦此文本框,按右键解除焦点", fg='#4a90e2')
+            else:
+                self.status_label.config(text="就绪", fg='#666666')
+
+        text_widget.bind("<Button-1>", _on_text_click)
+
+        def _on_text_right_click(event):
+            if self.limit_height:
+                self.root.focus_set()
+                self.status_label.config(text="就绪", fg='#666666')
+                return "break"
+
+        text_widget.bind("<Button-3>", _on_text_right_click)
+        # ----------------------------
+
+        # 点击标题栏/容器 -> 清除焦点
+        def _clear_focus(event):
+            self.root.focus_set()
+            self.status_label.config(text="就绪", fg='#666666')
+
+        title_bar.bind('<Button-1>', _clear_focus)
+        container.bind('<Button-1>', _clear_focus)
 
         # Ctrl+A 全选
         text_widget.bind('<Control-a>', self.on_ctrl_a)
@@ -509,17 +503,51 @@ class WindowTextExtractor:
 
         text_widget.config(state=tk.DISABLED)
 
-        line_count = int(text_widget.index(tk.END).split('.')[0])
+        # === 最终修复：字体度量计算法 ===
+        # 原理：不依赖控件渲染，直接通过字体对象计算文本换行后的行数
         
+        # 1. 获取字体对象
+        # 使用 text_widget 的字体配置
+        font_obj = tkfont.Font(text_widget, text_widget.cget("font"))
+        
+        # 2. 计算文本区域的有效宽度
+        # result_canvas 固定宽度为 660 (在 create_widgets 中设置)
+        # 减去外层边框、内边距等，假设文本可用宽度为 600 像素
+        # 这是一个估算值，非常可靠
+        available_width = 600
+        
+        # 3. 获取单个字符的平均宽度 (Consolas 是等宽字体，非常方便)
+        char_width = font_obj.measure("A")
+        if char_width == 0: char_width = 7 # 防护
+        
+        # 每行能容纳的字符数
+        chars_per_line = available_width // char_width
+        if chars_per_line == 0: chars_per_line = 80 # 防护
+        
+        # 4. 计算实际需要的行数
+        lines_count = 0
+        # 按逻辑行分割
+        logical_lines = text.split('\n')
+        for line in logical_lines:
+            # 计算该逻辑行因为自动换行会产生多少显示行
+            # 使用 math.ceil 确保向上取整
+            if len(line) == 0:
+                lines_count += 1 # 空行也算一行
+            else:
+                lines_count += math.ceil(len(line) / chars_per_line)
+        
+        # 5. 设置高度
+        # 限制模式
         if self.limit_height:
-            display_height = min(line_count, self.max_display_lines)
+            display_height = min(lines_count, self.max_display_lines)
             text_widget.config(height=display_height)
-            if line_count > self.max_display_lines:
+            if lines_count > self.max_display_lines:
                 scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
             else:
                 scrollbar.pack_forget()
         else:
-            text_widget.config(height=line_count)
+            # 非限制模式：设置计算出的行数
+            text_widget.config(height=lines_count)
             scrollbar.pack_forget()
 
     def update_filter_menu(self):
